@@ -1,0 +1,94 @@
+trigger:
+- none
+
+parameters:
+- name: environmentName 
+  type: string 
+  default: 'dev'
+  values:
+  - dev
+  - tst
+  - prd
+- name: BuildNumber 
+  type: string
+  default: latest
+    
+name: ${{ parameters.environmentName }}-${{ parameters.BuildNumber }}_ranOn_$(Date:ddMMyy).r$(Rev:r)
+
+variables:
+- template: ./variables/askq-app-${{ parameters.environmentName }}-variables.yml
+- template: ./variables/app-pipeline-variables.yml
+- name: tag 
+  value: ${{ parameters.BuildNumber }}
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Deploy
+  displayName: Deploy stage
+  jobs:
+  - deployment: DeployWeb
+    displayName: Deploy job
+    environment: ${{ parameters.environmentName }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: Check if the image exists
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              # Script logs into acr, checks if the provided tag is in th acr, 
+              # then changes the latest tag to the actual build number and passes that in.
+              inlineScript: |
+                az acr login --name $(containerRegistry)
+                GET_TAG=$(az acr repository show-tags --name $(containerRegistry) --repository $(imageRepository) --query "[?@=='$(tag)']" -o tsv)
+                if [ -z "${GET_TAG}" ]; then
+                    echo "Docker image with tag $(tag) does not exist."
+                    exit 1 
+                else
+                    echo "Docker image with tag $(tag) does exist."
+                    if [ "$GET_TAG" == "latest" ]; then
+                        digest=$(az acr manifest show-metadata -r $(containerRegistry) -n $(imageRepository):latest --query digest --output tsv)
+                        CHECKED_TAG=$(az acr manifest show-metadata -r $(containerRegistry) -n $(imageRepository)@$digest --query "tags[?@ != 'latest']" --output tsv)
+                    else
+                        CHECKED_TAG="$(tag)"
+                    fi
+                    echo "Using tag : $CHECKED_TAG"
+                fi
+                echo "##vso[task.setvariable variable=CHECKED_TAG]$CHECKED_TAG"
+          - task: AzureWebAppContainer@1
+            displayName: Deploy to Azure Web App
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              appName: $(webAppName)
+              containers: $(containerRegistry).azurecr.io/$(imageRepository):$(CHECKED_TAG)
+              appSettings: -Port 5000 -ENVIRONMENT_NAME ${{ parameters.environmentName }} -PIPELINE_BUILD_NUMBER $(CHECKED_TAG)
+
+# Linting stage using MegaLinter
+# - stage: MegaLinter
+#   jobs:
+#   - job: MegaLinter
+#     displayName: Linter
+#     steps:
+#       - checkout: self
+#       # Pull MegaLinter
+#       - script: docker pull oxsecurity/megalinter:v8
+#       # Run MegaLinter
+#       - script: |
+#           docker run -v $(System.DefaultWorkingDirectory):/tmp/lint \
+#             --env-file <(env | grep -e SYSTEM_ -e BUILD_ -e TF_ -e AGENT_) \
+#             -e SYSTEM_ACCESSTOKEN=$(System.AccessToken) \
+#             -e GIT_AUTHORIZATION_BEARER=$(System.AccessToken) \
+#             oxsecurity/megalinter:v8
+#         continueOnError: true
+#       # Upload MegaLinter reports
+#       - task: PublishPipelineArtifact@1
+#         condition: succeededOrFailed()
+#         displayName: Upload MegaLinter reports
+#         inputs:
+#           targetPath: "$(System.DefaultWorkingDirectory)/megalinter-reports/"
+#           artifactName: MegaLinterReport
