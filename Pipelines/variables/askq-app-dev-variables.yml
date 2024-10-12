@@ -1,0 +1,7 @@
+variables:
+  resourceGroupName: 'rg-askq-app-dev-uks-01'
+  azureServiceConnection: 'sc-askq-app-dev-uks-01'
+  webAppName: 'app-askq-app-dev-uks-01'
+
+
+
